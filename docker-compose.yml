@@ -1,0 +1,276 @@
+x-common-env: &common-env
+  env_file:
+    - .env
+  volumes:
+    - ./data:/app/data
+    - ./artifacts:/app/artifacts
+    - ./logs:/app/logs
+    - ./src:/app/src
+    - ./.env:/app/.env
+
+x-airflow-common: &airflow-common
+  image: cardio/airflow:latest
+  env_file:
+    - .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${AIRFLOW_DB}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./src:/app/src
+    - ./data:/app/data
+    - ./artifacts:/app/artifacts
+    - ./logs:/app/logs
+    - ./.env:/app/.env
+    - /var/run/docker.sock:/var/run/docker.sock
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: cardio_postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_SYSTEM_DB}
+      APP_DB: ${APP_DB}
+      AIRFLOW_DB: ${AIRFLOW_DB}
+      SUPERSET_DB: ${SUPERSET_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_SYSTEM_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    image: cardio/airflow:latest
+    container_name: cardio_airflow_init
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${AIRFLOW_DB}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER}
+      AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD}
+    user: "${AIRFLOW_UID}:0"
+    entrypoint: /bin/bash
+    command:
+      - -ec
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_USER}" \
+          --password "${AIRFLOW_PASSWORD}" \
+          --firstname Airflow \
+          --lastname Admin \
+          --role Admin \
+          --email admin@example.com || true
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+      - ./.env:/app/.env
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: cardio_airflow_webserver
+    restart: unless-stopped
+    command: webserver
+    ports:
+      - "8090:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: cardio_airflow_scheduler
+    restart: unless-stopped
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  module_01_extract:
+    build:
+      context: .
+      dockerfile: docker/module_01_extract/Dockerfile
+    image: cardio/module_01_extract:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/01_extract_eis.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_02_load_raw:
+    build:
+      context: .
+      dockerfile: docker/module_02_load_raw/Dockerfile
+    image: cardio/module_02_load_raw:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/02_load_raw_to_postgres.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_03_build_silver:
+    build:
+      context: .
+      dockerfile: docker/module_03_build_silver/Dockerfile
+    image: cardio/module_03_build_silver:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/03_build_silver_layer.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_04_prepare_labeling:
+    build:
+      context: .
+      dockerfile: docker/module_04_prepare_labeling/Dockerfile
+    image: cardio/module_04_prepare_labeling:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/04_prepare_labeling.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_05_load_labels:
+    build:
+      context: .
+      dockerfile: docker/module_05_load_labels/Dockerfile
+    image: cardio/module_05_load_labels:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/05_load_labeled_data.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_06_train_model:
+    build:
+      context: .
+      dockerfile: docker/module_06_train_model/Dockerfile
+    image: cardio/module_06_train_model:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/06_train_models.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_07_score_gold:
+    build:
+      context: .
+      dockerfile: docker/module_07_score_gold/Dockerfile
+    image: cardio/module_07_score_gold:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/07_score_and_build_gold.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  module_08_visualize:
+    build:
+      context: .
+      dockerfile: docker/module_08_visualize/Dockerfile
+    image: cardio/module_08_visualize:latest
+    <<: *common-env
+    profiles: ["jobs"]
+    command: ["python", "src/modules/08_visualize_results.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  superset-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: cardio/superset:latest
+    container_name: cardio_superset_init
+    env_file:
+      - .env
+    environment:
+      SUPERSET_LOAD_EXAMPLES: "no"
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_CONFIG_PATH: /app/docker/superset_config.py
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${SUPERSET_DB}
+      SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      SUPERSET_ADMIN_FIRSTNAME: ${SUPERSET_ADMIN_FIRSTNAME}
+      SUPERSET_ADMIN_LASTNAME: ${SUPERSET_ADMIN_LASTNAME}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL}
+    volumes:
+      - ./docker/superset:/app/docker
+    command:
+      - /bin/bash
+      - -ec
+      - |
+          superset db upgrade
+          superset fab create-admin \
+            --username "${SUPERSET_ADMIN_USERNAME}" \
+            --firstname "${SUPERSET_ADMIN_FIRSTNAME}" \
+            --lastname "${SUPERSET_ADMIN_LASTNAME}" \
+            --email "${SUPERSET_ADMIN_EMAIL}" \
+            --password "${SUPERSET_ADMIN_PASSWORD}" || true
+          superset init
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: cardio/superset:latest
+    container_name: cardio_superset
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SUPERSET_LOAD_EXAMPLES: "no"
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      SUPERSET_CONFIG_PATH: /app/docker/superset_config.py
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${SUPERSET_DB}
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./docker/superset:/app/docker
+    command:
+      - /bin/bash
+      - -ec
+      - |
+          superset run -h 0.0.0.0 -p 8088
+    depends_on:
+      postgres:
+        condition: service_healthy
+      superset-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

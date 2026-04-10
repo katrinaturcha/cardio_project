@@ -1,0 +1,11 @@
+pandas==2.2.2
+sqlalchemy==1.4.52
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+openpyxl==3.1.2
+matplotlib==3.8.4
+scikit-learn==1.4.2
+joblib==1.4.2
+selenium==4.19.0
+graphviz==0.20.3
+apache-airflow-providers-docker==3.11.0
