@@ -1,13 +1,15 @@
 """
 Шаг 2. Этот модуль загружает сырой файл в PostgreSQL.
-Он создаёт базу при первом запуске, приводит названия столбцов к рабочему виду и защищает таблицу от дублей.
+Он приводит названия столбцов к рабочему виду и защищает таблицу от дублей.
 """
 
 import pandas as pd
 from sqlalchemy import text
+from psycopg2.extras import execute_values
+
 from src.common.config import RAW_MERGED_CSV
 from src.common.constants import COLUMN_MAPPING
-from src.common.db import create_database_if_not_exists, get_engine
+from src.common.db import get_engine
 from src.common.helpers import add_hash_key, read_csv_with_fallback
 from src.common.logging_utils import get_logger
 
@@ -28,8 +30,10 @@ def prepare_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             extra_counter += 1
 
     df = df.rename(columns=renamed_columns)
+
     for col in df.columns:
         df[col] = df[col].fillna("").astype(str)
+
     df = add_hash_key(df)
     df = df.drop_duplicates(subset=["hash_key"]).reset_index(drop=True)
     return df
@@ -39,9 +43,9 @@ def create_raw_table_if_not_exists(engine, df: pd.DataFrame) -> None:
     columns_sql = []
     for col in df.columns:
         if col == "hash_key":
-            columns_sql.append(f'{col} TEXT UNIQUE')
+            columns_sql.append(f'"{col}" TEXT UNIQUE')
         else:
-            columns_sql.append(f'{col} TEXT')
+            columns_sql.append(f'"{col}" TEXT')
 
     create_sql = f"""
     CREATE TABLE IF NOT EXISTS raw_contracts (
@@ -56,29 +60,33 @@ def create_raw_table_if_not_exists(engine, df: pd.DataFrame) -> None:
 
 
 def insert_without_duplicates(engine, df: pd.DataFrame) -> None:
-    stage_table = "raw_contracts_stage"
+    insert_columns = list(df.columns)
+    quoted_columns = ", ".join(f'"{col}"' for col in insert_columns)
 
-    with engine.begin() as conn:
-        df.to_sql(stage_table, conn, if_exists="replace", index=False)
+    values = [tuple(row[col] for col in insert_columns) for _, row in df.iterrows()]
 
-        insert_columns = [col for col in df.columns]
-        select_columns = [f's.{col}' for col in df.columns]
+    insert_sql = f"""
+    INSERT INTO raw_contracts ({quoted_columns})
+    VALUES %s
+    ON CONFLICT (hash_key) DO NOTHING;
+    """
 
-        insert_sql = f"""
-        INSERT INTO raw_contracts ({', '.join(insert_columns)})
-        SELECT {', '.join(select_columns)}
-        FROM {stage_table} s
-        LEFT JOIN raw_contracts t ON s.hash_key = t.hash_key
-        WHERE t.hash_key IS NULL;
-        """
-
-        conn.execute(text(insert_sql))
-        conn.execute(text(f"DROP TABLE IF EXISTS {stage_table}"))
+    raw_conn = engine.raw_connection()
+    try:
+        with raw_conn.cursor() as cur:
+            execute_values(
+                cur,
+                insert_sql,
+                values,
+                page_size=1000,
+            )
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
 
 
 def main():
     logger.info("Начат шаг 2. Загрузка сырого слоя в БД")
-    # create_database_if_not_exists()
     engine = get_engine()
 
     df = read_csv_with_fallback(RAW_MERGED_CSV)
