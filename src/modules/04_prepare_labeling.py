@@ -3,39 +3,50 @@
 Он выбирает записи со словами про кардиоплегию, убирает повторы и сохраняет простой Excel для проверки человеком.
 """
 
+from __future__ import annotations
+
 import pandas as pd
+
+from src.common.base import BasePipelineStep
 from src.common.config import LABELING_FILE_PATH
-from src.common.db import get_engine
-from src.common.logging_utils import get_logger
-
-logger = get_logger("module_04_prepare_labeling", "module_04_prepare_labeling.log")
+from src.common.db import DatabaseManager
 
 
-def load_silver_data() -> pd.DataFrame:
-    engine = get_engine()
-    query = "SELECT purchase_object_name FROM silver_contracts"
-    return pd.read_sql(query, engine)
+class LabelingPreparationStep(BasePipelineStep):
+    logger_name = "module_04_prepare_labeling"
+    log_file_name = "module_04_prepare_labeling.log"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.engine = DatabaseManager().get_app_engine()
+        self.output_path = LABELING_FILE_PATH
+
+    def load_silver_data(self) -> pd.DataFrame:
+        return pd.read_sql("SELECT purchase_object_name FROM silver_contracts", self.engine)
+
+    @staticmethod
+    def filter_candidates(df: pd.DataFrame) -> pd.DataFrame:
+        result = df.copy()
+        result["purchase_object_name"] = result["purchase_object_name"].fillna("").astype(str)
+        mask = result["purchase_object_name"].str.contains("кардиоплег", case=False, na=False)
+        result = result[mask].copy()
+        result = result.drop_duplicates(subset=["purchase_object_name"]).reset_index(drop=True)
+        result["label"] = None
+        result["label_comment"] = None
+        return result[["purchase_object_name", "label", "label_comment"]]
+
+    def run(self) -> None:
+        self.logger.info("Начат шаг 4. Подготовка файла для разметки")
+        silver_df = self.load_silver_data()
+        self.log_rows("Прочитано строк из silver_contracts", silver_df)
+        labeling_df = self.filter_candidates(silver_df)
+        labeling_df.to_excel(self.output_path, index=False)
+        self.log_rows("Файл для разметки сохранён", labeling_df)
+        self.logger.info("Путь к файлу: %s", self.output_path)
 
 
-def filter_candidates(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["purchase_object_name"] = df["purchase_object_name"].fillna("").astype(str)
-    mask = df["purchase_object_name"].str.contains("кардиоплег", case=False, na=False)
-    df = df[mask].copy()
-    df = df.drop_duplicates(subset=["purchase_object_name"]).reset_index(drop=True)
-    df["label"] = None
-    df["label_comment"] = None
-    return df[["purchase_object_name", "label", "label_comment"]]
-
-
-def main():
-    logger.info("Начат шаг 4. Подготовка файла для разметки")
-    df = load_silver_data()
-    logger.info("Прочитано строк из silver_contracts: %s", len(df))
-    result = filter_candidates(df)
-    result.to_excel(LABELING_FILE_PATH, index=False)
-    logger.info("Файл для разметки сохранён: %s", LABELING_FILE_PATH)
-    logger.info("Строк в файле для разметки: %s", len(result))
+def main() -> None:
+    LabelingPreparationStep().run()
 
 
 if __name__ == "__main__":
