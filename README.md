@@ -1,66 +1,49 @@
-# Проект по анализу закупок систем кардиоплегии
+# Анализ закупок систем кардиоплегии
 
-Этот проект собирает данные из ЕИС, загружает их в PostgreSQL, очищает их, обучает модель по размеченному набору, строит итоговые витрины и сохраняет графики.
+## Описание проекта
+
+В рамках проекта реализован конвейер обработки данных государственных закупок, размещённых в Единой информационной системе (ЕИС).
+Конвейер обеспечивает автоматизированное извлечение, загрузку, очистку и аналитическую обработку данных, а также обучение модели классификации и формирование итоговых витрин данных.
+
+Результатом работы является подготовленный набор данных (gold-слой), пригодный для последующей аналитики и визуализации.
+
+---
 
 ## Структура проекта
 
-- `src/modules/01_extract_eis.py` — шаг 1. Скачивает выгрузки из ЕИС и собирает общий файл.
-- `src/modules/02_load_raw_to_postgres.py` — шаг 2. Загружает сырой слой в PostgreSQL.
-- `src/modules/03_build_silver_layer.py` — шаг 3. Очищает данные и строит silver-слой.
-- `src/modules/04_prepare_labeling.py` — шаг 4. Готовит файл для ручной разметки.
-- `src/modules/05_load_labeled_data.py` — шаг 5. Загружает размеченный файл в БД.
-- `src/modules/06_train_models.py` — шаг 6. Обучает модели и сохраняет лучшую.
-- `src/modules/07_score_and_build_gold.py` — шаг 7. Делает скоринг и собирает gold-слой.
-- `src/modules/08_visualize_results.py` — шаг 8. Строит графики и сохраняет отчёты.
+Основная логика реализована в виде последовательных модулей:
 
-## Быстрый запуск в PyCharm
+- `src/modules/01_extract_eis.py` — извлечение данных из ЕИС и формирование объединённого файла;
+- `src/modules/02_load_raw_to_postgres.py` — загрузка исходных данных (raw-слой) в PostgreSQL;
+- `src/modules/03_build_silver_layer.py` — очистка, нормализация и формирование silver-слоя;
+- `src/modules/04_prepare_labeling.py` — подготовка данных для ручной разметки;
+- `src/modules/05_load_labeled_data.py` — загрузка размеченных данных в базу;
+- `src/modules/06_train_models.py` — обучение моделей классификации и выбор лучшей модели;
+- `src/modules/07_score_and_build_gold.py` — применение модели и формирование gold-слоя;
+- `src/modules/08_visualize_results.py` — построение графиков и формирование отчётных материалов.
 
-1. Открой проект в PyCharm.
-2. Создай виртуальное окружение.
-3. Установи зависимости:
+---
 
-```bash
-pip install -r requirements.txt
-```
+## Оркестрация процессов
 
-4. Проверь значения в `.env`.
-5. Подними PostgreSQL и Airflow через Docker:
+Для автоматизации выполнения конвейера используются DAG в Apache Airflow:
 
-```bash
-docker compose up -d postgres airflow-init airflow-webserver airflow-scheduler
-```
+- `cardio_monthly_pipeline` — выполняет обновление данных с периодичностью один раз в месяц;
+- `cardio_retrain_pipeline` — используется для повторного обучения модели после обновления размеченного набора данных.
 
-6. Запускай модули по порядку через PyCharm или через Docker.
+---
 
-## Ручной порядок запуска
+## Логирование
 
-```bash
-python src/modules/01_extract_eis.py
-python src/modules/02_load_raw_to_postgres.py
-python src/modules/03_build_silver_layer.py
-python src/modules/04_prepare_labeling.py
-# После этого вручную разметь файл data/labeling/cardioplegia_labeling.xlsx
-python src/modules/05_load_labeled_data.py
-python src/modules/06_train_models.py
-python src/modules/07_score_and_build_gold.py
-python src/modules/08_visualize_results.py
-```
+Для каждого этапа предусмотрено ведение логов.
+Файлы логирования сохраняются в директории `logs/`.
 
-## Оркестрация в Airflow
+---
 
-В проекте есть два DAG:
+## Требования к размеченным данным
 
-- `cardio_monthly_pipeline` — обновляет данные 1 числа каждого месяца.
-- `cardio_retrain_pipeline` — запускается вручную, когда готов новый размеченный файл.
+Для корректной работы модуля обучения модели входной файл разметки должен содержать следующие поля:
 
-## Логи
-
-Логи каждого шага пишутся в папку `logs/`.
-
-## Замечание по разметке
-
-В размеченном файле нужны только три столбца:
-
-- `purchase_object_name`
-- `label`
-- `label_comment`
+- `purchase_object_name` — текстовое описание объекта закупки;
+- `label` — бинарная метка класса;
+- `label_comment` — пояснение к присвоенной метке.
